@@ -228,16 +228,16 @@ public extension ParseUser {
     /**
      Saves the `ParseUser` *asynchronously*.
      - parameter ignoringCustomObjectIdConfig: Ignore checking for `objectId`
-     when `ParseConfiguration.isAllowingCustomObjectIds = true` to allow for mixed
+     when `ParseConfiguration.isRequiringCustomObjectIds = true` to allow for mixed
      `objectId` environments. Defaults to false.
      - parameter options: A set of header options sent to the server. Defaults to an empty set.
      - returns: Returns the saved `ParseUser`.
      - throws: An error of type `ParseError`.
      - important: If an object saved has the same objectId as current, it will automatically update the current.
-     - warning: If you are using `ParseConfiguration.isAllowingCustomObjectIds = true`
+     - warning: If you are using `ParseConfiguration.isRequiringCustomObjectIds = true`
      and plan to generate all of your `objectId`'s on the client-side then you should leave
      `ignoringCustomObjectIdConfig = false`. Setting
-     `ParseConfiguration.isAllowingCustomObjectIds = true` and
+     `ParseConfiguration.isRequiringCustomObjectIds = true` and
      `ignoringCustomObjectIdConfig = true` means the client will generate `objectId`'s
      and the server will generate an `objectId` only when the client does not provide one. This can
      increase the probability of colliiding `objectId`'s as the client and server `objectId`'s may be generated using
@@ -353,7 +353,7 @@ public extension Sequence where Element: ParseUser {
      - parameter transaction: Treat as an all-or-nothing operation. If some operation failure occurs that
      prevents the transaction from completing, then none of the objects are committed to the Parse Server database.
      - parameter ignoringCustomObjectIdConfig: Ignore checking for `objectId`
-     when `ParseConfiguration.isAllowingCustomObjectIds = true` to allow for mixed
+     when `ParseConfiguration.isRequiringCustomObjectIds = true` to allow for mixed
      `objectId` environments. Defaults to false.
      - parameter options: A set of header options sent to the server. Defaults to an empty set.
      - returns: Returns an array of Result enums with the object if a save was successful or a
@@ -363,10 +363,10 @@ public extension Sequence where Element: ParseUser {
      - warning: If `transaction = true`, then `batchLimit` will be automatically be set to the amount of the
      objects in the transaction. The developer should ensure their respective Parse Servers can handle the limit or else
      the transactions can fail.
-     - warning: If you are using `ParseConfiguration.isAllowingCustomObjectIds = true`
+     - warning: If you are using `ParseConfiguration.isRequiringCustomObjectIds = true`
      and plan to generate all of your `objectId`'s on the client-side then you should leave
      `ignoringCustomObjectIdConfig = false`. Setting
-     `ParseConfiguration.isAllowingCustomObjectIds = true` and
+     `ParseConfiguration.isRequiringCustomObjectIds = true` and
      `ignoringCustomObjectIdConfig = true` means the client will generate `objectId`'s
      and the server will generate an `objectId` only when the client does not provide one. This can
      increase the probability of colliiding `objectId`'s as the client and server `objectId`'s may be generated using
@@ -503,4 +503,116 @@ public extension Sequence where Element: ParseUser {
     }
 }
 
+// MARK: Helper Methods (Internal)
+internal extension ParseUser {
+
+    func command(method: Method,
+                 ignoringCustomObjectIdConfig: Bool = false,
+                 options: API.Options,
+                 callbackQueue: DispatchQueue) async throws -> Self {
+        let (savedChildObjects, savedChildFiles) = try await self.ensureDeepSave(options: options)
+        do {
+            let command: API.Command<Self, Self>!
+            switch method {
+            case .save:
+                command = try self.saveCommand(ignoringCustomObjectIdConfig: ignoringCustomObjectIdConfig)
+            case .create:
+                command = self.createCommand()
+            case .replace:
+                command = try self.replaceCommand()
+            case .update:
+                command = try self.updateCommand()
+            }
+            let saved = try await command
+                .executeAsync(options: options,
+                              callbackQueue: callbackQueue,
+                              childObjects: savedChildObjects,
+                              childFiles: savedChildFiles)
+            try? Self.updateKeychainIfNeeded([saved])
+            return saved
+        } catch {
+            let defaultError = ParseError(code: .unknownError,
+                                          message: error.localizedDescription)
+            let parseError = error as? ParseError ?? defaultError
+            throw parseError
+        }
+    }
+}
+
+// MARK: Batch Support
+internal extension Sequence where Element: ParseUser {
+    func batchCommand(method: Method,
+                      batchLimit limit: Int?,
+                      transaction: Bool,
+                      ignoringCustomObjectIdConfig: Bool = false,
+                      options: API.Options,
+                      callbackQueue: DispatchQueue) async throws -> [(Result<Element, ParseError>)] {
+        var options = options
+        options.insert(.cachePolicy(.reloadIgnoringLocalCacheData))
+        var childObjects = [String: PointerType]()
+        var childFiles = [UUID: ParseFile]()
+        var commands = [API.Command<Self.Element, Self.Element>]()
+        let objects = map { $0 }
+        for object in objects {
+            let (savedChildObjects, savedChildFiles) = try await object
+                .ensureDeepSave(options: options,
+                                isShouldReturnIfChildObjectsFound: transaction)
+            try savedChildObjects.forEach {(key, value) in
+                guard childObjects[key] == nil else {
+                    throw ParseError(code: .unknownError, message: "circular dependency")
+                }
+                childObjects[key] = value
+            }
+            try savedChildFiles.forEach {(key, value) in
+                guard childFiles[key] == nil else {
+                    throw ParseError(code: .unknownError, message: "circular dependency")
+                }
+                childFiles[key] = value
+            }
+            do {
+                switch method {
+                case .save:
+                    commands.append(
+                        try object.saveCommand(ignoringCustomObjectIdConfig: ignoringCustomObjectIdConfig)
+                    )
+                case .create:
+                    commands.append(object.createCommand())
+                case .replace:
+                    commands.append(try object.replaceCommand())
+                case .update:
+                    commands.append(try object.updateCommand())
+                }
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                throw parseError
+            }
+        }
+
+        do {
+            var returnBatch = [(Result<Self.Element, ParseError>)]()
+            let batchLimit = limit != nil ? limit! : ParseConstants.batchLimit
+            try canSendTransactions(transaction, objectCount: commands.count, batchLimit: batchLimit)
+            let batches = BatchUtils.splitArray(commands, valuesPerSegment: batchLimit)
+            for batch in batches {
+                let saved = try await API.Command<Self.Element, Self.Element>
+                        .batch(commands: batch, transaction: transaction)
+                        .executeAsync(options: options,
+                                      batching: true,
+                                      callbackQueue: callbackQueue,
+                                      childObjects: childObjects,
+                                      childFiles: childFiles)
+                returnBatch.append(contentsOf: saved)
+            }
+            try? Self.Element.updateKeychainIfNeeded(returnBatch.compactMap {try? $0.get()})
+            return returnBatch
+        } catch {
+            let defaultError = ParseError(code: .unknownError,
+                                          message: error.localizedDescription)
+            let parseError = error as? ParseError ?? defaultError
+            throw parseError
+        }
+    }
+}
 #endif

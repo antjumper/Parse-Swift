@@ -95,6 +95,7 @@ internal extension URLSession {
                     do {
                         responseData = try ParseCoding.jsonEncoder().encode(pushStatus)
                     } catch {
+                        URLSession.parse.configuration.urlCache?.removeCachedResponse(for: request)
                         return .failure(ParseError(code: .unknownError, message: error.localizedDescription))
                     }
                 }
@@ -102,6 +103,7 @@ internal extension URLSession {
             do {
                 return try .success(mapper(responseData))
             } catch {
+                URLSession.parse.configuration.urlCache?.removeCachedResponse(for: request)
                 guard let parseError = error as? ParseError else {
                     guard JSONSerialization.isValidJSONObject(responseData),
                           let json = try? JSONSerialization
@@ -153,11 +155,10 @@ internal extension URLSession {
                 let data = try ParseCoding.jsonEncoder().encode(location)
                 return try .success(mapper(data))
             } catch {
-                guard let parseError = error as? ParseError else {
-                    return .failure(ParseError(code: .unknownError,
-                                               // swiftlint:disable:next line_length
-                                               message: "Error decoding parse-server response: \(response) with error: \(String(describing: error))"))
-                }
+                let defaultError = ParseError(code: .unknownError,
+                                              // swiftlint:disable:next line_length
+                                              message: "Error decoding parse-server response: \(response) with error: \(String(describing: error))")
+                let parseError = error as? ParseError ?? defaultError
                 return .failure(parseError)
             }
         }
@@ -227,37 +228,60 @@ internal extension URLSession {
     ) {
         var task: URLSessionTask?
         if let data = data {
-            task = uploadTask(with: request, from: data) { (responseData, urlResponse, responseError) in
-                completion(self.makeResult(request: request,
-                                           responseData: responseData,
-                                           urlResponse: urlResponse,
-                                           responseError: responseError,
-                                           mapper: mapper))
+            do {
+                task = try ParseSwift
+                    .configuration
+                    .parseFileTransfer
+                    .upload(with: request,
+                            from: data) { (responseData, urlResponse, updatedRequest, responseError) in
+                    completion(self.makeResult(request: updatedRequest ?? request,
+                                               responseData: responseData,
+                                               urlResponse: urlResponse,
+                                               responseError: responseError,
+                                               mapper: mapper))
+                }
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: "Error uploading file: \(String(describing: error))")
+                let parseError = error as? ParseError ?? defaultError
+                completion(.failure(parseError))
             }
         } else if let file = file {
-            task = uploadTask(with: request, fromFile: file) { (responseData, urlResponse, responseError) in
-                completion(self.makeResult(request: request,
-                                           responseData: responseData,
-                                           urlResponse: urlResponse,
-                                           responseError: responseError,
-                                           mapper: mapper))
+            do {
+                task = try ParseSwift
+                    .configuration
+                    .parseFileTransfer
+                    .upload(with: request,
+                            fromFile: file) { (responseData, urlResponse, updatedRequest, responseError) in
+                    completion(self.makeResult(request: updatedRequest ?? request,
+                                               responseData: responseData,
+                                               urlResponse: urlResponse,
+                                               responseError: responseError,
+                                               mapper: mapper))
+                }
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: "Error uploading file: \(String(describing: error))")
+                let parseError = error as? ParseError ?? defaultError
+                completion(.failure(parseError))
             }
         } else {
             completion(.failure(ParseError(code: .unknownError, message: "data and file both cannot be nil")))
         }
-        if let task = task {
-            #if compiler(>=5.5.2) && canImport(_Concurrency)
-            Task {
-                await Parse.sessionDelegate.delegates.updateUpload(task, callback: progress)
-                await Parse.sessionDelegate.delegates.updateTask(task, queue: notificationQueue)
-                task.resume()
-            }
-            #else
-            Parse.sessionDelegate.uploadDelegates[task] = progress
-            Parse.sessionDelegate.taskCallbackQueues[task] = notificationQueue
-            task.resume()
-            #endif
+        guard let task = task else {
+            return
         }
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            await Parse.sessionDelegate.delegates.updateUpload(task, callback: progress)
+            await Parse.sessionDelegate.delegates.updateTask(task, queue: notificationQueue)
+            task.resume()
+        }
+        #else
+        Parse.sessionDelegate.uploadDelegates[task] = progress
+        Parse.sessionDelegate.taskCallbackQueues[task] = notificationQueue
+        task.resume()
+        #endif
     }
 
     func downloadTask<U>(
@@ -272,21 +296,6 @@ internal extension URLSession {
                                          location: location,
                                          urlResponse: urlResponse,
                                          responseError: responseError, mapper: mapper)
-            if case .success(let file) = result {
-                guard let response = urlResponse,
-                      let parseFile = file as? ParseFile,
-                      let fileLocation = parseFile.localURL,
-                      let data = try? ParseCoding.jsonEncoder().encode(fileLocation) else {
-                          completion(result)
-                          return
-                }
-                if URLSession.parse.configuration.urlCache?.cachedResponse(for: request) == nil {
-                    URLSession.parse.configuration.urlCache?
-                        .storeCachedResponse(.init(response: response,
-                                                   data: data),
-                                             for: request)
-                }
-            }
             completion(result)
         }
         #if compiler(>=5.5.2) && canImport(_Concurrency)

@@ -106,6 +106,21 @@ class ParseObjectTests: XCTestCase { // swiftlint:disable:this type_body_length
         }
     }
 
+    struct GameDefaultMerge: ParseObject {
+        //: These are required by ParseObject
+        var objectId: String?
+        var createdAt: Date?
+        var updatedAt: Date?
+        var ACL: ParseACL?
+        var originalData: Data?
+
+        //: Your own properties
+        var gameScore: GameScore?
+        var gameScores: [GameScore]?
+        var name: String?
+        var profilePicture: ParseFile?
+    }
+
     struct Game2: ParseObject {
         //: These are required by ParseObject
         var objectId: String?
@@ -323,13 +338,11 @@ class ParseObjectTests: XCTestCase { // swiftlint:disable:this type_body_length
         #endif
         try ParseStorage.shared.deleteAll()
 
-        guard let fileManager = ParseFileManager(),
-              let defaultDirectoryPath = fileManager.defaultDataDirectoryPath else {
+        guard let fileManager = ParseFileManager() else {
             throw ParseError(code: .unknownError, message: "Should have initialized file manage")
         }
 
-        let directory2 = defaultDirectoryPath
-            .appendingPathComponent(ParseConstants.fileDownloadsDirectory, isDirectory: true)
+        let directory2 = try ParseFileManager.downloadDirectory()
         let expectation2 = XCTestExpectation(description: "Delete files2")
         fileManager.removeDirectoryContents(directory2) { _ in
             expectation2.fulfill()
@@ -366,11 +379,15 @@ class ParseObjectTests: XCTestCase { // swiftlint:disable:this type_body_length
 
     func testParseObjectMutable() throws {
         var score = GameScore(points: 19, name: "fire")
+        XCTAssertEqual(score, score.mergeable)
         score.objectId = "yolo"
         score.createdAt = Date()
-        let empty = score.mergeable
+        var empty = score.mergeable
+        XCTAssertNotNil(empty.originalData)
         XCTAssertTrue(score.hasSameObjectId(as: empty))
         XCTAssertEqual(score.createdAt, empty.createdAt)
+        empty.player = "Ali"
+        XCTAssertEqual(empty.originalData, empty.mergeable.originalData)
     }
 
     func testMerge() throws {
@@ -405,18 +422,20 @@ class ParseObjectTests: XCTestCase { // swiftlint:disable:this type_body_length
     }
 
     func testMergeDefaultImplementation() throws {
-        var score = Game()
+        var score = GameDefaultMerge()
         score.objectId = "yolo"
         score.createdAt = Date()
         score.updatedAt = Date()
-        var updated = score.mergeable
+        var updated = score.set(\.name, to: "moreFire")
         updated.updatedAt = Calendar.current.date(byAdding: .init(day: 1), to: Date())
-        updated.name = "moreFire"
-        let merged = try updated.merge(with: score)
-        XCTAssertEqual(merged.name, updated.name)
-        XCTAssertEqual(merged.gameScore, score.gameScore)
-        XCTAssertEqual(merged.gameScores, score.gameScores)
-        XCTAssertEqual(merged.profilePicture, updated.profilePicture)
+        score.updatedAt = updated.updatedAt
+        score.name = updated.name
+        var merged = try updated.merge(with: score)
+        merged.originalData = nil
+        // Get dates in correct format from ParseDecoding strategy
+        let encoded = try ParseCoding.jsonEncoder().encode(score)
+        score = try ParseCoding.jsonDecoder().decode(GameDefaultMerge.self, from: encoded)
+        XCTAssertEqual(merged, score)
     }
 
     func testMergeDifferentObjectId() throws {
@@ -425,6 +444,155 @@ class ParseObjectTests: XCTestCase { // swiftlint:disable:this type_body_length
         var score2 = score
         score2.objectId = "nolo"
         XCTAssertThrowsError(try score2.merge(with: score))
+    }
+
+    func testRevertObject() throws {
+        var score = GameScore(points: 19, name: "fire")
+        score.objectId = "yolo"
+        var mutableScore = score.mergeable
+        mutableScore.points = 50
+        mutableScore.player = "ali"
+        XCTAssertNotEqual(mutableScore, score)
+        mutableScore = try mutableScore.revertObject()
+        XCTAssertEqual(mutableScore, score)
+    }
+
+    func testRevertObjectMissingOriginal() throws {
+        var score = GameScore(points: 19, name: "fire")
+        score.objectId = "yolo"
+        var mutableScore = score
+        mutableScore.points = 50
+        mutableScore.player = "ali"
+        XCTAssertNotEqual(mutableScore, score)
+        do {
+            mutableScore = try mutableScore.revertObject()
+            XCTFail("Should have thrown error")
+        } catch {
+            guard let parseError = error as? ParseError else {
+                XCTFail("Should have casted")
+                return
+            }
+            XCTAssertTrue(parseError.message.contains("Missing original"))
+        }
+    }
+
+    func testRevertObjectDiffObjectId() throws {
+        var score = GameScore(points: 19, name: "fire")
+        score.objectId = "yolo"
+        var mutableScore = score.mergeable
+        mutableScore.points = 50
+        mutableScore.player = "ali"
+        mutableScore.objectId = "nolo"
+        XCTAssertNotEqual(mutableScore, score)
+        do {
+            mutableScore = try mutableScore.revertObject()
+            XCTFail("Should have thrown error")
+        } catch {
+            guard let parseError = error as? ParseError else {
+                XCTFail("Should have casted")
+                return
+            }
+            XCTAssertTrue(parseError.message.contains("objectId as the original"))
+        }
+    }
+
+    func testRevertKeyPath() throws {
+        var score = GameScore(points: 19, name: "fire")
+        score.objectId = "yolo"
+        var mutableScore = score.mergeable
+        mutableScore.points = 50
+        mutableScore.player = "ali"
+        XCTAssertNotEqual(mutableScore, score)
+        mutableScore = try mutableScore.revertKeyPath(\.player)
+        XCTAssertNotEqual(mutableScore, score)
+        XCTAssertEqual(mutableScore.objectId, score.objectId)
+        XCTAssertNotEqual(mutableScore.points, score.points)
+        XCTAssertEqual(mutableScore.player, score.player)
+    }
+
+    func testRevertKeyPathUpdatedNil() throws {
+        var score = GameScore(points: 19, name: "fire")
+        score.objectId = "yolo"
+        var mutableScore = score.mergeable
+        mutableScore.points = 50
+        mutableScore.player = nil
+        XCTAssertNotEqual(mutableScore, score)
+        mutableScore = try mutableScore.revertKeyPath(\.player)
+        XCTAssertNotEqual(mutableScore, score)
+        XCTAssertEqual(mutableScore.objectId, score.objectId)
+        XCTAssertNotEqual(mutableScore.points, score.points)
+        XCTAssertEqual(mutableScore.player, score.player)
+    }
+
+    func testRevertKeyPathOriginalNil() throws {
+        var score = GameScore(points: 19, name: "fire")
+        score.objectId = "yolo"
+        score.player = nil
+        var mutableScore = score.mergeable
+        mutableScore.points = 50
+        mutableScore.player = "ali"
+        XCTAssertNotEqual(mutableScore, score)
+        mutableScore = try mutableScore.revertKeyPath(\.player)
+        XCTAssertNotEqual(mutableScore, score)
+        XCTAssertEqual(mutableScore.objectId, score.objectId)
+        XCTAssertNotEqual(mutableScore.points, score.points)
+        XCTAssertEqual(mutableScore.player, score.player)
+    }
+
+    func testRevertKeyPathMissingOriginal() throws {
+        var score = GameScore(points: 19, name: "fire")
+        score.objectId = "yolo"
+        var mutableScore = score
+        mutableScore.points = 50
+        mutableScore.player = "ali"
+        XCTAssertNotEqual(mutableScore, score)
+        do {
+            mutableScore = try mutableScore.revertKeyPath(\.player)
+            XCTFail("Should have thrown error")
+        } catch {
+            guard let parseError = error as? ParseError else {
+                XCTFail("Should have casted")
+                return
+            }
+            XCTAssertTrue(parseError.message.contains("Missing original"))
+        }
+    }
+
+    func testRevertKeyPathDiffObjectId() throws {
+        var score = GameScore(points: 19, name: "fire")
+        score.objectId = "yolo"
+        var mutableScore = score.mergeable
+        mutableScore.points = 50
+        mutableScore.player = "ali"
+        mutableScore.objectId = "nolo"
+        XCTAssertNotEqual(mutableScore, score)
+        do {
+            mutableScore = try mutableScore.revertKeyPath(\.player)
+            XCTFail("Should have thrown error")
+        } catch {
+            guard let parseError = error as? ParseError else {
+                XCTFail("Should have casted")
+                return
+            }
+            XCTAssertTrue(parseError.message.contains("objectId as the original"))
+        }
+    }
+
+    func testGet() throws {
+        let originalPoints = 10
+        let score = GameScore(points: originalPoints)
+        let points = try score.get(\.points)
+        XCTAssertEqual(points, originalPoints)
+        do {
+            try score.get(\.ACL)
+            XCTFail("Should have thrown error")
+        } catch {
+            guard let parseError = error as? ParseError else {
+                XCTFail("Should have casted")
+                return
+            }
+            XCTAssertTrue(parseError.message.contains("unwrap"))
+        }
     }
 
     func testFetchCommand() {

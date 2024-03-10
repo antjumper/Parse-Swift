@@ -25,7 +25,10 @@ struct GameScore: ParseObject {
     var points: Int?
     var name: String?
 
-    //: Implement your own version of merge
+    /*:
+     Optional - implement your own version of merge
+     for faster decoding after updating your `ParseObject`.
+     */
     func merge(with object: Self) throws -> Self {
         var updated = try mergeParse(with: object)
         if updated.shouldRestoreKey(\.points,
@@ -115,7 +118,7 @@ do {
 //: There may be cases where you want to set/forceSet a value to null
 //: instead of unsetting
 let setToNullOperation = savedScore
-    .operation.set(("name", \.name), value: nil)
+    .operation.set(("name", \.name), to: nil)
 do {
     let updatedScore = try setToNullOperation.save()
     print("Updated score: \(updatedScore). Check the new score on Parse Dashboard.")

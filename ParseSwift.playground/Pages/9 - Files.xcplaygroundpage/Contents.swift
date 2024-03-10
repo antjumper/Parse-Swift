@@ -27,7 +27,10 @@ struct GameScore: ParseObject {
     var profilePicture: ParseFile?
     var myData: ParseFile?
 
-    //: Implement your own version of merge
+    /*:
+     Optional - implement your own version of merge
+     for faster decoding after updating your `ParseObject`.
+     */
     func merge(with object: Self) throws -> Self {
         var updated = try mergeParse(with: object)
         if updated.shouldRestoreKey(\.points,
@@ -71,9 +74,10 @@ let profilePic = ParseFile(name: "profile.svg", cloudURL: linkToFile)
 //: Set the picture as part of your ParseObject
 score.profilePicture = profilePic
 
-/*: Save asynchronously (preferred way) - Performs work on background
-    queue and returns to specified callbackQueue.
-    If no callbackQueue is specified it returns to main queue.
+/*:
+ Save asynchronously (preferred way) - Performs work on background
+ queue and returns to specified callbackQueue.
+ If no callbackQueue is specified it returns to main queue.
 */
 score.save { result in
     switch result {
@@ -118,7 +122,8 @@ score.save { result in
     }
 }
 
-/*: Files can also be saved from data. Below is how to do it synchronously, but async is similar to above
+/*:
+ Files can also be saved from data. Below is how to do it synchronously, but async is similar to above
  Create a new `ParseFile` for your data.
  */
 let sampleData = "Hello World".data(using: .utf8)!
@@ -150,7 +155,8 @@ do {
             print("The file is now saved at: \(fetchedFile.localURL!)")
             print("The full details of your data ParseFile are: \(fetchedFile)")
 
-            /*: If you want to use the data from the file to display the text file or image, you need to retreive
+            /*:
+             If you want to use the data from the file to display the text file or image, you need to retreive
              the data from the file.
             */
             guard let dataFromParseFile = try? Data(contentsOf: fetchedFile.localURL!) else {
@@ -176,7 +182,8 @@ do {
     fatalError("Error saving: \(error)")
 }
 
-/*: Files can also be saved from files located on your device by using:
+/*:
+ Files can also be saved from files located on your device by using:
  let localFile = ParseFile(name: "hello.txt", localURL: URL).
 */
 

@@ -51,11 +51,53 @@ class InitializeSDKTests: XCTestCase {
         try super.tearDownWithError()
         #if !os(Linux) && !os(Android) && !os(Windows)
         try KeychainStore.shared.deleteAll()
-        try KeychainStore.objectiveC?.deleteAll()
+        try KeychainStore.objectiveC?.deleteAllObjectiveC()
         try KeychainStore.old.deleteAll()
         URLSession.shared.configuration.urlCache?.removeAllCachedResponses()
         #endif
         try ParseStorage.shared.deleteAll()
+    }
+
+    func testDeprecatedInitializers() {
+        guard let url = URL(string: "http://localhost:1337/1") else {
+            XCTFail("Should create valid URL")
+            return
+        }
+
+        ParseSwift.initialize(applicationId: "applicationId",
+                              clientKey: "clientKey",
+                              masterKey: "masterKey",
+                              serverURL: url,
+                              allowingCustomObjectIds: false) { (_, credential) in
+            credential(.performDefaultHandling, nil)
+        }
+        XCTAssertNotNil(Parse.sessionDelegate.authentication)
+        ParseSwift.updateAuthentication(nil)
+        XCTAssertNil(Parse.sessionDelegate.authentication)
+
+        let configuration = ParseConfiguration(applicationId: "applicationId",
+                                               clientKey: "clientKey",
+                                               masterKey: "masterKey",
+                                               serverURL: url,
+                                               allowingCustomObjectIds: false) { (_, credential) in
+            credential(.performDefaultHandling, nil)
+        }
+        ParseSwift.initialize(configuration: configuration)
+        XCTAssertNotNil(Parse.sessionDelegate.authentication)
+        ParseSwift.updateAuthentication(nil)
+        XCTAssertNil(Parse.sessionDelegate.authentication)
+
+        let configuration2 = ParseConfiguration(applicationId: "applicationId",
+                                               clientKey: "clientKey",
+                                               masterKey: "masterKey",
+                                               serverURL: url,
+                                               migratingFromObjcSDK: false) { (_, credential) in
+            credential(.performDefaultHandling, nil)
+        }
+        ParseSwift.initialize(configuration: configuration2)
+        XCTAssertNotNil(Parse.sessionDelegate.authentication)
+        ParseSwift.updateAuthentication(nil)
+        XCTAssertNil(Parse.sessionDelegate.authentication)
     }
 
     #if !os(Linux) && !os(Android) && !os(Windows)
@@ -226,7 +268,7 @@ class InitializeSDKTests: XCTestCase {
                                   clientKey: "clientKey",
                                   masterKey: "masterKey",
                                   serverURL: url,
-                                  keyValueStore: memory,
+                                  primitiveStore: memory,
                                   testing: true)
 
             guard let currentInstallation = Installation.current else {
@@ -299,7 +341,7 @@ class InitializeSDKTests: XCTestCase {
                               clientKey: "clientKey",
                               masterKey: "masterKey",
                               serverURL: url,
-                              keyValueStore: memory,
+                              primitiveStore: memory,
                               testing: true)
         guard let installation = Installation.current else {
             XCTFail("Should have installation")
@@ -335,7 +377,7 @@ class InitializeSDKTests: XCTestCase {
                               clientKey: "clientKey",
                               masterKey: "masterKey",
                               serverURL: url,
-                              keyValueStore: memory,
+                              primitiveStore: memory,
                               testing: true)
         guard let installation = Installation.current else {
             XCTFail("Should have installation")
@@ -371,7 +413,7 @@ class InitializeSDKTests: XCTestCase {
                               clientKey: "clientKey",
                               masterKey: "masterKey",
                               serverURL: url,
-                              keyValueStore: memory,
+                              primitiveStore: memory,
                               testing: true)
         guard let installation = Installation.current else {
             XCTFail("Should have installation")
@@ -408,7 +450,7 @@ class InitializeSDKTests: XCTestCase {
                               clientKey: "clientKey",
                               masterKey: "masterKey",
                               serverURL: url,
-                              keyValueStore: memory,
+                              primitiveStore: memory,
                               testing: true)
         guard let installation = Installation.current else {
             XCTFail("Should have installation")
@@ -444,7 +486,7 @@ class InitializeSDKTests: XCTestCase {
                               clientKey: "clientKey",
                               masterKey: "masterKey",
                               serverURL: url,
-                              keyValueStore: memory,
+                              primitiveStore: memory,
                               testing: true)
         guard let installation = Installation.current else {
             XCTFail("Should have installation")
@@ -534,7 +576,7 @@ class InitializeSDKTests: XCTestCase {
             return
         }
         let objcInstallationId = "helloWorld"
-        _ = objcParseKeychain.set(object: objcInstallationId, forKey: "installationId")
+        _ = objcParseKeychain.setObjectiveC(object: objcInstallationId, forKey: "installationId")
 
         guard let url = URL(string: "http://localhost:1337/1") else {
             XCTFail("Should create valid URL")
@@ -563,7 +605,7 @@ class InitializeSDKTests: XCTestCase {
             return
         }
         let objcInstallationId = "helloWorld"
-        _ = objcParseKeychain.set(object: objcInstallationId, forKey: "installationId")
+        _ = objcParseKeychain.setObjectiveC(object: objcInstallationId, forKey: "installationId")
 
         guard let url = URL(string: "http://localhost:1337/1") else {
             XCTFail("Should create valid URL")
@@ -573,7 +615,8 @@ class InitializeSDKTests: XCTestCase {
                               clientKey: "clientKey",
                               masterKey: "masterKey",
                               serverURL: url,
-                              migratingFromObjcSDK: true)
+                              migratingFromObjcSDK: true,
+                              parseFileTransfer: nil)
         guard let installation = Installation.current else {
             XCTFail("Should have installation")
             return
@@ -607,15 +650,15 @@ class InitializeSDKTests: XCTestCase {
             return
         }
         let objcInstallationId = "helloWorld"
-        _ = objcParseKeychain.set(object: objcInstallationId, forKey: "installationId")
+        _ = objcParseKeychain.setObjectiveC(object: objcInstallationId, forKey: "installationId")
 
-        guard let retrievedInstallationId: String? = try objcParseKeychain.get(valueFor: "installationId") else {
+        guard let retrievedInstallationId: String? = objcParseKeychain.objectObjectiveC(forKey: "installationId") else {
             XCTFail("Should have unwrapped")
             return
         }
         XCTAssertEqual(retrievedInstallationId, objcInstallationId)
         XCTAssertNoThrow(try ParseSwift.deleteObjectiveCKeychain())
-        let retrievedInstallationId2: String? = try objcParseKeychain.get(valueFor: "installationId")
+        let retrievedInstallationId2: String? = objcParseKeychain.objectObjectiveC(forKey: "installationId")
         XCTAssertNil(retrievedInstallationId2)
 
         //This is needed for tear down
@@ -638,7 +681,7 @@ class InitializeSDKTests: XCTestCase {
             return
         }
         let objcInstallationId = "helloWorld"
-        _ = objcParseKeychain.set(object: objcInstallationId, forKey: "anotherPlace")
+        _ = objcParseKeychain.setObjectiveC(object: objcInstallationId, forKey: "anotherPlace")
 
         guard let url = URL(string: "http://localhost:1337/1") else {
             XCTFail("Should create valid URL")

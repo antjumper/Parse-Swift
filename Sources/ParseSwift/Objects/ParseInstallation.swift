@@ -10,7 +10,7 @@ import Foundation
 
 /**
  Objects that conform to the `ParseInstallation` protocol have a local representation of an
- installation persisted to the Parse cloud. This protocol inherits from the
+ installation persisted to the Keychain and Parse Server. This protocol inherits from the
  `ParseObject` protocol, and retains the same functionality of a `ParseObject`, but also extends
  it with installation-specific fields and related immutability and validity
  checks.
@@ -21,16 +21,15 @@ import Foundation
  is automatically updated to match the device's time zone
  when the `ParseInstallation` is saved, thus these fields might not reflect the
  latest device state if the installation has not recently been saved.
-
  `ParseInstallation`s which have a valid `deviceToken` and are saved to
  the Parse Server can be used to target push notifications. Use `setDeviceToken` to set the
  `deviceToken` properly.
 
  - warning: If the use of badge is desired, it should be retrieved by using UIKit, AppKit, etc. and
- stored in `ParseInstallation.badge` before saving/updating the installation.
-
- - warning: Linux developers should set `appName`, `appIdentifier`, and `appVersion`
- manually as `ParseSwift` does not have access to Bundle.main.
+ stored in `ParseInstallation.badge` when saving/updating the installation.
+ - warning: Linux, Android, and Windows developers should set `appName`,
+ `appIdentifier`, and `appVersion` manually as `ParseSwift` does not have access
+ to Bundle.main.
 */
 public protocol ParseInstallation: ParseObject {
 
@@ -154,7 +153,11 @@ public extension ParseInstallation {
     }
 
     func merge(with object: Self) throws -> Self {
-        try mergeParse(with: object)
+        do {
+            return try mergeAutomatically(object)
+        } catch {
+            return try mergeParse(with: object)
+        }
     }
 }
 
@@ -169,7 +172,7 @@ extension ParseInstallation {
     }
 
     func endpoint(_ method: API.Method) -> API.Endpoint {
-        if !Parse.configuration.isAllowingCustomObjectIds || method != .POST {
+        if !Parse.configuration.isRequiringCustomObjectIds || method != .POST {
             return endpoint
         } else {
             return .installations
@@ -298,6 +301,76 @@ public extension ParseInstallation {
         set {
             Self.currentContainer.currentInstallation = newValue
             Self.updateInternalFieldsCorrectly()
+        }
+    }
+
+    /**
+     Copy the `ParseInstallation` *asynchronously* based on the `objectId`.
+     On success, this saves the `ParseInstallation` to the keychain, so you can retrieve
+     the current installation using *current*.
+
+     - parameter objectId: The **id** of the `ParseInstallation` to become.
+     - parameter copyEntireInstallation: When **true**, copies the entire `ParseInstallation`.
+     When **false**, only the `channels` and `deviceToken` are copied; resulting in a new
+     `ParseInstallation` for original `sessionToken`. Defaults to **true**.
+     - parameter options: A set of header options sent to the server. Defaults to an empty set.
+     - parameter callbackQueue: The queue to return to after completion. Default value of .main.
+     - parameter completion: The block to execute.
+     It should have the following argument signature: `(Result<Self, ParseError>)`.
+     - note: The default cache policy for this method is `.reloadIgnoringLocalCacheData`. If a developer
+     desires a different policy, it should be inserted in `options`.
+    */
+    static func become(_ objectId: String,
+                       copyEntireInstallation: Bool = true,
+                       options: API.Options = [],
+                       callbackQueue: DispatchQueue = .main,
+                       completion: @escaping (Result<Self, ParseError>) -> Void) {
+        guard var currentInstallation = Self.current else {
+            let error = ParseError(code: .unknownError,
+                                   message: "Current installation does not exist")
+            callbackQueue.async {
+                completion(.failure(error))
+            }
+            return
+        }
+        guard currentInstallation.objectId != objectId else {
+            // If the installationId's are the same, assume successful replacement already occured.
+            callbackQueue.async {
+                completion(.success(currentInstallation))
+            }
+            return
+        }
+        currentInstallation.objectId = objectId
+        currentInstallation.fetch(options: options, callbackQueue: callbackQueue) { result in
+            switch result {
+            case .success(var updatedInstallation):
+                if copyEntireInstallation {
+                    updatedInstallation.updateAutomaticInfo()
+                    Self.currentContainer.installationId = updatedInstallation.installationId
+                    Self.currentContainer.currentInstallation = updatedInstallation
+                } else {
+                    Self.current?.channels = updatedInstallation.channels
+                    if Self.current?.deviceToken == nil {
+                        Self.current?.deviceToken = updatedInstallation.deviceToken
+                    }
+                }
+                Self.saveCurrentContainerToKeychain()
+                guard let latestInstallation = Self.current else {
+                    let error = ParseError(code: .unknownError,
+                                           message: "Had trouble migrating the installation")
+                    callbackQueue.async {
+                        completion(.failure(error))
+                    }
+                    return
+                }
+                latestInstallation.save(options: options,
+                                        callbackQueue: callbackQueue,
+                                        completion: completion)
+            case .failure(let error):
+                callbackQueue.async {
+                    completion(.failure(error))
+                }
+            }
         }
     }
 }
@@ -479,13 +552,12 @@ extension ParseInstallation {
                             try Self.updateKeychainIfNeeded([foundResult])
                             completion(.success(foundResult))
                         } catch {
-                            let returnError: ParseError!
-                            if let parseError = error as? ParseError {
-                                returnError = parseError
-                            } else {
-                                returnError = ParseError(code: .unknownError, message: error.localizedDescription)
+                            let defaultError = ParseError(code: .unknownError,
+                                                          message: error.localizedDescription)
+                            let parseError = error as? ParseError ?? defaultError
+                            callbackQueue.async {
+                                completion(.failure(parseError))
                             }
-                            completion(.failure(returnError))
                         }
                     } else {
                         completion(result)
@@ -533,6 +605,7 @@ extension ParseInstallation {
      - returns: Returns saved `ParseInstallation`.
      - important: If an object saved has the same objectId as current, it will automatically update the current.
     */
+    @discardableResult
     public func save(options: API.Options = []) throws -> Self {
         try save(ignoringCustomObjectIdConfig: false,
                  options: options)
@@ -542,16 +615,16 @@ extension ParseInstallation {
      Saves the `ParseInstallation` *synchronously* and throws an error if there is an issue.
 
      - parameter ignoringCustomObjectIdConfig: Ignore checking for `objectId`
-     when `ParseConfiguration.isAllowingCustomObjectIds = true` to allow for mixed
+     when `ParseConfiguration.isRequiringCustomObjectIds = true` to allow for mixed
      `objectId` environments. Defaults to false.
      - parameter options: A set of header options sent to the server. Defaults to an empty set.
      - throws: An error of type `ParseError`.
      - returns: Returns saved `ParseInstallation`.
      - important: If an object saved has the same objectId as current, it will automatically update the current.
-     - warning: If you are using `ParseConfiguration.isAllowingCustomObjectIds = true`
+     - warning: If you are using `ParseConfiguration.isRequiringCustomObjectIds = true`
      and plan to generate all of your `objectId`'s on the client-side then you should leave
      `ignoringCustomObjectIdConfig = false`. Setting
-     `ParseConfiguration.isAllowingCustomObjectIds = true` and
+     `ParseConfiguration.isRequiringCustomObjectIds = true` and
      `ignoringCustomObjectIdConfig = true` means the client will generate `objectId`'s
      and the server will generate an `objectId` only when the client does not provide one. This can
      increase the probability of colliding `objectId`'s as the client and server `objectId`'s may be generated using
@@ -560,6 +633,7 @@ extension ParseInstallation {
      - note: The default cache policy for this method is `.reloadIgnoringLocalCacheData`. If a developer
      desires a different policy, it should be inserted in `options`.
     */
+    @discardableResult
     public func save(ignoringCustomObjectIdConfig: Bool,
                      options: API.Options = []) throws -> Self {
         var options = options
@@ -593,17 +667,17 @@ extension ParseInstallation {
      Saves the `ParseInstallation` *asynchronously* and executes the given callback block.
 
      - parameter ignoringCustomObjectIdConfig: Ignore checking for `objectId`
-     when `ParseConfiguration.isAllowingCustomObjectIds = true` to allow for mixed
+     when `ParseConfiguration.isRequiringCustomObjectIds = true` to allow for mixed
      `objectId` environments. Defaults to false.
      - parameter options: A set of header options sent to the server. Defaults to an empty set.
      - parameter callbackQueue: The queue to return to after completion. Default value of .main.
      - parameter completion: The block to execute.
      It should have the following argument signature: `(Result<Self, ParseError>)`.
      - important: If an object saved has the same objectId as current, it will automatically update the current.
-     - warning: If you are using `ParseConfiguration.isAllowingCustomObjectIds = true`
+     - warning: If you are using `ParseConfiguration.isRequiringCustomObjectIds = true`
      and plan to generate all of your `objectId`'s on the client-side then you should leave
      `ignoringCustomObjectIdConfig = false`. Setting
-     `ParseConfiguration.isAllowingCustomObjectIds = true` and
+     `ParseConfiguration.isRequiringCustomObjectIds = true` and
      `ignoringCustomObjectIdConfig = true` means the client will generate `objectId`'s
      and the server will generate an `objectId` only when the client does not provide one. This can
      increase the probability of colliding `objectId`'s as the client and server `objectId`'s may be generated using
@@ -618,11 +692,31 @@ extension ParseInstallation {
         callbackQueue: DispatchQueue = .main,
         completion: @escaping (Result<Self, ParseError>) -> Void
     ) {
-        command(method: .save,
+        let method = Method.save
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            do {
+                let object = try await command(method: method,
+                                               ignoringCustomObjectIdConfig: ignoringCustomObjectIdConfig,
+                                               options: options,
+                                               callbackQueue: callbackQueue)
+                completion(.success(object))
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+            }
+        }
+        #else
+        command(method: method,
                 ignoringCustomObjectIdConfig: ignoringCustomObjectIdConfig,
                 options: options,
                 callbackQueue: callbackQueue,
                 completion: completion)
+        #endif
     }
 
     /**
@@ -640,10 +734,29 @@ extension ParseInstallation {
         callbackQueue: DispatchQueue = .main,
         completion: @escaping (Result<Self, ParseError>) -> Void
     ) {
-        command(method: .create,
+        let method = Method.create
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            do {
+                let object = try await command(method: method,
+                                               options: options,
+                                               callbackQueue: callbackQueue)
+                completion(.success(object))
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+            }
+        }
+        #else
+        command(method: method,
                 options: options,
                 callbackQueue: callbackQueue,
                 completion: completion)
+        #endif
     }
 
     /**
@@ -662,10 +775,29 @@ extension ParseInstallation {
         callbackQueue: DispatchQueue = .main,
         completion: @escaping (Result<Self, ParseError>) -> Void
     ) {
-        command(method: .replace,
+        let method = Method.replace
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            do {
+                let object = try await command(method: method,
+                                               options: options,
+                                               callbackQueue: callbackQueue)
+                completion(.success(object))
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+            }
+        }
+        #else
+        command(method: method,
                 options: options,
                 callbackQueue: callbackQueue,
                 completion: completion)
+        #endif
     }
 
     /**
@@ -684,10 +816,29 @@ extension ParseInstallation {
         callbackQueue: DispatchQueue = .main,
         completion: @escaping (Result<Self, ParseError>) -> Void
     ) {
-        command(method: .update,
+        let method = Method.update
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            do {
+                let object = try await command(method: method,
+                                               options: options,
+                                               callbackQueue: callbackQueue)
+                completion(.success(object))
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+            }
+        }
+        #else
+        command(method: method,
                 options: options,
                 callbackQueue: callbackQueue,
                 completion: completion)
+        #endif
     }
 
     func command(
@@ -724,12 +875,11 @@ extension ParseInstallation {
                             completion(result)
                         }
                 } catch {
+                    let defaultError = ParseError(code: .unknownError,
+                                                  message: error.localizedDescription)
+                    let parseError = error as? ParseError ?? defaultError
                     callbackQueue.async {
-                        if let parseError = error as? ParseError {
-                            completion(.failure(parseError))
-                        } else {
-                            completion(.failure(.init(code: .unknownError, message: error.localizedDescription)))
-                        }
+                        completion(.failure(parseError))
                     }
                 }
                 return
@@ -741,7 +891,7 @@ extension ParseInstallation {
     }
 
     func saveCommand(ignoringCustomObjectIdConfig: Bool = false) throws -> API.Command<Self, Self> {
-        if Parse.configuration.isAllowingCustomObjectIds && objectId == nil && !ignoringCustomObjectIdConfig {
+        if Parse.configuration.isRequiringCustomObjectIds && objectId == nil && !ignoringCustomObjectIdConfig {
             throw ParseError(code: .missingObjectId, message: "objectId must not be nil")
         }
         if isSaved {
@@ -774,15 +924,16 @@ extension ParseInstallation {
         let mapper = { (data: Data) -> Self in
             var updatedObject = self
             updatedObject.originalData = nil
-            let object = try ParseCoding.jsonDecoder().decode(ReplaceResponse.self, from: data).apply(to: updatedObject)
+            updatedObject = try ParseCoding.jsonDecoder().decode(ReplaceResponse.self,
+                                                                 from: data).apply(to: updatedObject)
             // MARK: The lines below should be removed when server supports PATCH.
             guard let originalData = self.originalData,
                   let original = try? ParseCoding.jsonDecoder().decode(Self.self,
                                                                        from: originalData),
-                  original.hasSameObjectId(as: object) else {
-                      return object
+                  original.hasSameObjectId(as: updatedObject) else {
+                      return updatedObject
                   }
-            return try object.merge(with: original)
+            return try updatedObject.merge(with: original)
         }
         return API.Command<Self, Self>(method: .PUT,
                                  path: endpoint,
@@ -798,14 +949,15 @@ extension ParseInstallation {
         let mapper = { (data: Data) -> Self in
             var updatedObject = self
             updatedObject.originalData = nil
-            let object = try ParseCoding.jsonDecoder().decode(UpdateResponse.self, from: data).apply(to: updatedObject)
+            updatedObject = try ParseCoding.jsonDecoder().decode(UpdateResponse.self,
+                                                                 from: data).apply(to: updatedObject)
             guard let originalData = self.originalData,
                   let original = try? ParseCoding.jsonDecoder().decode(Self.self,
                                                                        from: originalData),
-                  original.hasSameObjectId(as: object) else {
-                      return object
+                  original.hasSameObjectId(as: updatedObject) else {
+                      return updatedObject
                   }
-            return try object.merge(with: original)
+            return try updatedObject.merge(with: original)
         }
         return API.Command<Self, Self>(method: .PATCH,
                                  path: endpoint,
@@ -862,13 +1014,12 @@ extension ParseInstallation {
                              try Self.updateKeychainIfNeeded([self], deleting: true)
                              completion(.success(()))
                          } catch {
-                             let returnError: ParseError!
-                             if let parseError = error as? ParseError {
-                                 returnError = parseError
-                             } else {
-                                 returnError = ParseError(code: .unknownError, message: error.localizedDescription)
+                             let defaultError = ParseError(code: .unknownError,
+                                                           message: error.localizedDescription)
+                             let parseError = error as? ParseError ?? defaultError
+                             callbackQueue.async {
+                                 completion(.failure(parseError))
                              }
-                             completion(.failure(returnError))
                          }
                      case .failure(let error):
                          completion(.failure(error))
@@ -913,7 +1064,7 @@ public extension Sequence where Element: ParseInstallation {
      is greater than the `batchLimit`, the objects will be sent to the server in waves up to the `batchLimit`.
      Defaults to 50.
      - parameter ignoringCustomObjectIdConfig: Ignore checking for `objectId`
-     when `ParseConfiguration.isAllowingCustomObjectIds = true` to allow for mixed
+     when `ParseConfiguration.isRequiringCustomObjectIds = true` to allow for mixed
      `objectId` environments. Defaults to false.
      - parameter options: A set of header options sent to the server. Defaults to an empty set.
      - parameter transaction: Treat as an all-or-nothing operation. If some operation failure occurs that
@@ -925,10 +1076,10 @@ public extension Sequence where Element: ParseInstallation {
      - warning: If `transaction = true`, then `batchLimit` will be automatically be set to the amount of the
      objects in the transaction. The developer should ensure their respective Parse Servers can handle the limit or else
      the transactions can fail.
-     - warning: If you are using `ParseConfiguration.isAllowingCustomObjectIds = true`
+     - warning: If you are using `ParseConfiguration.isRequiringCustomObjectIds = true`
      and plan to generate all of your `objectId`'s on the client-side then you should leave
      `ignoringCustomObjectIdConfig = false`. Setting
-     `ParseConfiguration.isAllowingCustomObjectIds = true` and
+     `ParseConfiguration.isRequiringCustomObjectIds = true` and
      `ignoringCustomObjectIdConfig = true` means the client will generate `objectId`'s
      and the server will generate an `objectId` only when the client does not provide one. This can
      increase the probability of colliding `objectId`'s as the client and server `objectId`'s may be generated using
@@ -937,6 +1088,7 @@ public extension Sequence where Element: ParseInstallation {
      - note: The default cache policy for this method is `.reloadIgnoringLocalCacheData`. If a developer
      desires a different policy, it should be inserted in `options`.
     */
+    @discardableResult
     func saveAll(batchLimit limit: Int? = nil, // swiftlint:disable:this function_body_length
                  transaction: Bool = configuration.isUsingTransactions,
                  ignoringCustomObjectIdConfig: Bool = false,
@@ -998,6 +1150,7 @@ public extension Sequence where Element: ParseInstallation {
             let currentBatch = try API.Command<Self.Element, Self.Element>
                 .batch(commands: $0, transaction: transaction)
                 .execute(options: options,
+                         batching: true,
                          childObjects: childObjects,
                          childFiles: childFiles)
             returnBatch.append(contentsOf: currentBatch)
@@ -1014,7 +1167,7 @@ public extension Sequence where Element: ParseInstallation {
      - parameter transaction: Treat as an all-or-nothing operation. If some operation failure occurs that
      prevents the transaction from completing, then none of the objects are committed to the Parse Server database.
      - parameter ignoringCustomObjectIdConfig: Ignore checking for `objectId`
-     when `ParseConfiguration.isAllowingCustomObjectIds = true` to allow for mixed
+     when `ParseConfiguration.isRequiringCustomObjectIds = true` to allow for mixed
      `objectId` environments. Defaults to false.
      - parameter options: A set of header options sent to the server. Defaults to an empty set.
      - parameter callbackQueue: The queue to return to after completion. Default value of .main.
@@ -1024,10 +1177,10 @@ public extension Sequence where Element: ParseInstallation {
      - warning: If `transaction = true`, then `batchLimit` will be automatically be set to the amount of the
      objects in the transaction. The developer should ensure their respective Parse Servers can handle the limit or else
      the transactions can fail.
-     - warning: If you are using `ParseConfiguration.isAllowingCustomObjectIds = true`
+     - warning: If you are using `ParseConfiguration.isRequiringCustomObjectIds = true`
      and plan to generate all of your `objectId`'s on the client-side then you should leave
      `ignoringCustomObjectIdConfig = false`. Setting
-     `ParseConfiguration.isAllowingCustomObjectIds = true` and
+     `ParseConfiguration.isRequiringCustomObjectIds = true` and
      `ignoringCustomObjectIdConfig = true` means the client will generate `objectId`'s
      and the server will generate an `objectId` only when the client does not provide one. This can
      increase the probability of colliding `objectId`'s as the client and server `objectId`'s may be generated using
@@ -1044,13 +1197,35 @@ public extension Sequence where Element: ParseInstallation {
         callbackQueue: DispatchQueue = .main,
         completion: @escaping (Result<[(Result<Element, ParseError>)], ParseError>) -> Void
     ) {
-        batchCommand(method: .save,
+        let method = Method.save
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            do {
+                let objects = try await batchCommand(method: method,
+                                                     batchLimit: limit,
+                                                     transaction: transaction,
+                                                     ignoringCustomObjectIdConfig: ignoringCustomObjectIdConfig,
+                                                     options: options,
+                                                     callbackQueue: callbackQueue)
+                completion(.success(objects))
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+            }
+        }
+        #else
+        batchCommand(method: method,
                      batchLimit: limit,
                      transaction: transaction,
                      ignoringCustomObjectIdConfig: ignoringCustomObjectIdConfig,
                      options: options,
                      callbackQueue: callbackQueue,
                      completion: completion)
+        #endif
     }
 
     /**
@@ -1077,12 +1252,33 @@ public extension Sequence where Element: ParseInstallation {
         callbackQueue: DispatchQueue = .main,
         completion: @escaping (Result<[(Result<Element, ParseError>)], ParseError>) -> Void
     ) {
-        batchCommand(method: .create,
+        let method = Method.create
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            do {
+                let objects = try await batchCommand(method: method,
+                                                     batchLimit: limit,
+                                                     transaction: transaction,
+                                                     options: options,
+                                                     callbackQueue: callbackQueue)
+                completion(.success(objects))
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+            }
+        }
+        #else
+        batchCommand(method: method,
                      batchLimit: limit,
                      transaction: transaction,
                      options: options,
                      callbackQueue: callbackQueue,
                      completion: completion)
+        #endif
     }
 
     /**
@@ -1110,12 +1306,33 @@ public extension Sequence where Element: ParseInstallation {
         callbackQueue: DispatchQueue = .main,
         completion: @escaping (Result<[(Result<Element, ParseError>)], ParseError>) -> Void
     ) {
-        batchCommand(method: .replace,
+        let method = Method.replace
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            do {
+                let objects = try await batchCommand(method: method,
+                                                     batchLimit: limit,
+                                                     transaction: transaction,
+                                                     options: options,
+                                                     callbackQueue: callbackQueue)
+                completion(.success(objects))
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+            }
+        }
+        #else
+        batchCommand(method: method,
                      batchLimit: limit,
                      transaction: transaction,
                      options: options,
                      callbackQueue: callbackQueue,
                      completion: completion)
+        #endif
     }
 
     /**
@@ -1143,12 +1360,33 @@ public extension Sequence where Element: ParseInstallation {
         callbackQueue: DispatchQueue = .main,
         completion: @escaping (Result<[(Result<Element, ParseError>)], ParseError>) -> Void
     ) {
-        batchCommand(method: .update,
+        let method = Method.update
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            do {
+                let objects = try await batchCommand(method: method,
+                                                     batchLimit: limit,
+                                                     transaction: transaction,
+                                                     options: options,
+                                                     callbackQueue: callbackQueue)
+                completion(.success(objects))
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+            }
+        }
+        #else
+        batchCommand(method: method,
                      batchLimit: limit,
                      transaction: transaction,
                      options: options,
                      callbackQueue: callbackQueue,
                      completion: completion)
+        #endif
     }
 
     internal func batchCommand( // swiftlint:disable:this function_parameter_count
@@ -1183,30 +1421,28 @@ public extension Sequence where Element: ParseInstallation {
                                     // swiftlint:disable:next line_length
                                     isShouldReturnIfChildObjectsFound: transaction) { (savedChildObjects, savedChildFiles, parseError) -> Void in
                     // If an error occurs, everything should be skipped
-                    if parseError != nil {
+                    if let parseError = parseError {
                         error = parseError
                     }
                     savedChildObjects.forEach {(key, value) in
-                        if error != nil {
+                        guard error == nil else {
                             return
                         }
-                        if childObjects[key] == nil {
-                            childObjects[key] = value
-                        } else {
+                        guard childObjects[key] == nil else {
                             error = ParseError(code: .unknownError, message: "circular dependency")
                             return
                         }
+                        childObjects[key] = value
                     }
                     savedChildFiles.forEach {(key, value) in
-                        if error != nil {
+                        guard error == nil else {
                             return
                         }
-                        if childFiles[key] == nil {
-                            childFiles[key] = value
-                        } else {
+                        guard childFiles[key] == nil else {
                             error = ParseError(code: .unknownError, message: "circular dependency")
                             return
                         }
+                        childFiles[key] = value
                     }
                     group.leave()
                 }
@@ -1232,12 +1468,11 @@ public extension Sequence where Element: ParseInstallation {
                         commands.append(try installation.updateCommand())
                     }
                 } catch {
+                    let defaultError = ParseError(code: .unknownError,
+                                                  message: error.localizedDescription)
+                    let parseError = error as? ParseError ?? defaultError
                     callbackQueue.async {
-                        if let parseError = error as? ParseError {
-                            completion(.failure(parseError))
-                        } else {
-                            completion(.failure(.init(code: .unknownError, message: error.localizedDescription)))
-                        }
+                        completion(.failure(parseError))
                     }
                     return
                 }
@@ -1254,6 +1489,7 @@ public extension Sequence where Element: ParseInstallation {
                     API.Command<Self.Element, Self.Element>
                             .batch(commands: batch, transaction: transaction)
                             .executeAsync(options: options,
+                                          batching: true,
                                           callbackQueue: callbackQueue,
                                           childObjects: childObjects,
                                           childFiles: childFiles) { results in
@@ -1275,12 +1511,11 @@ public extension Sequence where Element: ParseInstallation {
                     }
                 }
             } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
                 callbackQueue.async {
-                    if let parseError = error as? ParseError {
-                        completion(.failure(parseError))
-                    } else {
-                        completion(.failure(.init(code: .unknownError, message: error.localizedDescription)))
-                    }
+                    completion(.failure(parseError))
                 }
             }
         }
@@ -1499,12 +1734,10 @@ public extension Sequence where Element: ParseInstallation {
                 }
             }
         } catch {
+            let defaultError = ParseError(code: .unknownError,
+                                          message: error.localizedDescription)
+            let parseError = error as? ParseError ?? defaultError
             callbackQueue.async {
-                guard let parseError = error as? ParseError else {
-                    completion(.failure(ParseError(code: .unknownError,
-                                                   message: error.localizedDescription)))
-                    return
-                }
                 completion(.failure(parseError))
             }
         }
@@ -1532,14 +1765,17 @@ public extension ParseInstallation {
      - warning: When initializing the Swift SDK, `migratingFromObjcSDK` should be set to **false**
      when calling this method.
      - warning: The latest **PFInstallation** from the Objective-C SDK should be saved to your
-     Parse Server before calling this method.
+     Parse Server before calling this method. This method assumes **PFInstallation.installationId**
+     is saved to the Keychain. If the **installationId** is not saved to the Keychain, this method will
+     not work.
     */
+    @available(*, deprecated, message: "This does not work, use become() instead")
     static func migrateFromObjCKeychain(copyEntireInstallation: Bool = true,
                                         options: API.Options = [],
                                         callbackQueue: DispatchQueue = .main,
                                         completion: @escaping (Result<Self, ParseError>) -> Void) {
         guard let objcParseKeychain = KeychainStore.objectiveC,
-              let oldInstallationId: String = objcParseKeychain.object(forKey: "installationId") else {
+              let oldInstallationId: String = objcParseKeychain.objectObjectiveC(forKey: "installationId") else {
             let error = ParseError(code: .unknownError,
                                    message: "Could not find Installation in the Objective-C SDK Keychain")
             callbackQueue.async {
@@ -1547,53 +1783,9 @@ public extension ParseInstallation {
             }
             return
         }
-        guard var currentInstallation = Self.current else {
-            let error = ParseError(code: .unknownError,
-                                   message: "Current installation does not exist")
-            callbackQueue.async {
-                completion(.failure(error))
-            }
-            return
-        }
-        guard currentInstallation.installationId != oldInstallationId else {
-            // If the installationId's are the same, assume successful migration already occured.
-            callbackQueue.async {
-                completion(.success(currentInstallation))
-            }
-            return
-        }
-        currentInstallation.installationId = oldInstallationId
-        currentInstallation.fetch(options: options, callbackQueue: callbackQueue) { result in
-            switch result {
-            case .success(var updatedInstallation):
-                if copyEntireInstallation {
-                    updatedInstallation.updateAutomaticInfo()
-                    Self.currentContainer.installationId = updatedInstallation.installationId
-                    Self.currentContainer.currentInstallation = updatedInstallation
-                } else {
-                    Self.current?.channels = updatedInstallation.channels
-                    if Self.current?.deviceToken == nil {
-                        Self.current?.deviceToken = updatedInstallation.deviceToken
-                    }
-                }
-                Self.saveCurrentContainerToKeychain()
-                guard let latestInstallation = Self.current else {
-                    let error = ParseError(code: .unknownError,
-                                           message: "Had trouble migrating the installation")
-                    callbackQueue.async {
-                        completion(.failure(error))
-                    }
-                    return
-                }
-                latestInstallation.save(options: options,
-                                        callbackQueue: callbackQueue,
-                                        completion: completion)
-            case .failure(let error):
-                callbackQueue.async {
-                    completion(.failure(error))
-                }
-            }
-        }
+        become(oldInstallationId,
+               copyEntireInstallation: copyEntireInstallation,
+               completion: completion)
     }
 
     /**
@@ -1615,7 +1807,7 @@ public extension ParseInstallation {
                                    callbackQueue: DispatchQueue = .main,
                                    completion: @escaping (Result<Void, ParseError>) -> Void) {
         guard let objcParseKeychain = KeychainStore.objectiveC,
-              let oldInstallationId: String = objcParseKeychain.object(forKey: "installationId") else {
+              let oldInstallationId: String = objcParseKeychain.objectObjectiveC(forKey: "installationId") else {
             let error = ParseError(code: .unknownError,
                                    message: "Could not find Installation in the Objective-C SDK Keychain")
             callbackQueue.async {

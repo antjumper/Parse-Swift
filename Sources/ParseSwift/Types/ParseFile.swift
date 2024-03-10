@@ -149,6 +149,60 @@ public struct ParseFile: Fileable, Savable, Fetchable, Deletable, Hashable {
     }
 }
 
+// MARK: Helper Methods (internal)
+extension ParseFile {
+    func setDefaultOptions(_ options: API.Options) -> API.Options {
+        var options = options
+        if let mimeType = mimeType {
+            options.insert(.mimeType(mimeType))
+        } else {
+            options.insert(.removeMimeType)
+        }
+        if let metadata = metadata {
+            options.insert(.metadata(metadata))
+        }
+        if let tags = tags {
+            options.insert(.tags(tags))
+        }
+        options = options.union(self.options)
+        return options
+    }
+
+    func checkDownloadsForFile(options: API.Options) throws -> ParseFile? {
+        var cachePolicy: URLRequest.CachePolicy = ParseSwift.configuration.requestCachePolicy
+        var shouldBreak = false
+        for option in options {
+            switch option {
+            case .cachePolicy(let policy):
+                cachePolicy = policy
+                shouldBreak = true
+            default:
+                continue
+            }
+            if shouldBreak {
+                break
+            }
+        }
+        switch cachePolicy {
+        case .useProtocolCachePolicy, .returnCacheDataElseLoad:
+            return try createLocalParseFileIfExists()
+        case .returnCacheDataDontLoad:
+            return try? createLocalParseFileIfExists()
+        default:
+            throw ParseError(code: .unknownError,
+                             message: "Policy defines to load from remote")
+        }
+    }
+
+    func createLocalParseFileIfExists() throws -> Self {
+        let fileLocation = try ParseFileManager.fileExists(self)
+        var mutableFile = self
+        mutableFile.localURL = fileLocation
+        return mutableFile
+    }
+}
+
+// MARK: Coding
 extension ParseFile {
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -275,21 +329,8 @@ extension ParseFile {
                      stream: InputStream,
                      callbackQueue: DispatchQueue = .main,
                      progress: ((URLSessionTask, Int64, Int64, Int64) -> Void)? = nil) throws {
-        var options = options
-        if let mimeType = mimeType {
-            options.insert(.mimeType(mimeType))
-        } else {
-            options.insert(.removeMimeType)
-        }
-        if let metadata = metadata {
-            options.insert(.metadata(metadata))
-        }
-        if let tags = tags {
-            options.insert(.tags(tags))
-        }
-        options = options.union(self.options)
-        return try uploadFileCommand()
-            .executeStream(options: options,
+        try uploadFileCommand()
+            .executeStream(options: setDefaultOptions(options),
                            callbackQueue: callbackQueue,
                            uploadProgress: progress,
                            stream: stream)
@@ -302,19 +343,7 @@ extension ParseFile {
      - returns: A saved `ParseFile`.
      */
     public func save(options: API.Options = []) throws -> ParseFile {
-        var options = options
-        if let mimeType = mimeType {
-            options.insert(.mimeType(mimeType))
-        } else {
-            options.insert(.removeMimeType)
-        }
-        if let metadata = metadata {
-            options.insert(.metadata(metadata))
-        }
-        if let tags = tags {
-            options.insert(.tags(tags))
-        }
-        options = options.union(self.options)
+        let options = setDefaultOptions(options)
         if isDownloadNeeded {
             let fetched = try fetch(options: options)
             return try fetched.uploadFileCommand().execute(options: options)
@@ -366,19 +395,7 @@ extension ParseFile {
     public func save(options: API.Options = [],
                      callbackQueue: DispatchQueue = .main,
                      progress: ((URLSessionTask, Int64, Int64, Int64) -> Void)?) throws -> ParseFile {
-        var options = options
-        if let mimeType = mimeType {
-            options.insert(.mimeType(mimeType))
-        } else {
-            options.insert(.removeMimeType)
-        }
-        if let metadata = metadata {
-            options.insert(.metadata(metadata))
-        }
-        if let tags = tags {
-            options.insert(.tags(tags))
-        }
-        options = options.union(self.options)
+        let options = setDefaultOptions(options)
         if isDownloadNeeded {
             let fetched = try fetch(options: options)
             return try fetched
@@ -440,19 +457,7 @@ extension ParseFile {
                      callbackQueue: DispatchQueue = .main,
                      progress: ((URLSessionTask, Int64, Int64, Int64) -> Void)? = nil,
                      completion: @escaping (Result<Self, ParseError>) -> Void) {
-        var options = options
-        if let mimeType = mimeType {
-            options.insert(.mimeType(mimeType))
-        } else {
-            options.insert(.removeMimeType)
-        }
-        if let metadata = metadata {
-            options.insert(.metadata(metadata))
-        }
-        if let tags = tags {
-            options.insert(.tags(tags))
-        }
-        options = options.union(self.options)
+        let options = setDefaultOptions(options)
         if isDownloadNeeded {
             fetch(options: options) { result in
                 switch result {
@@ -466,13 +471,11 @@ extension ParseFile {
                                 completion(result)
                             }
                     } catch {
+                        let defaultError = ParseError(code: .unknownError,
+                                                      message: error.localizedDescription)
+                        let parseError = error as? ParseError ?? defaultError
                         callbackQueue.async {
-                            if let parseError = error as? ParseError {
-                                completion(.failure(parseError))
-                            } else {
-                                let parseError = ParseError(code: .unknownError, message: error.localizedDescription)
-                                completion(.failure(parseError))
-                            }
+                            completion(.failure(parseError))
                         }
                     }
                 case .failure(let error):
@@ -490,13 +493,11 @@ extension ParseFile {
                         completion(result)
                     }
             } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
                 callbackQueue.async {
-                    if let parseError = error as? ParseError {
-                        completion(.failure(parseError))
-                    } else {
-                        let parseError = ParseError(code: .unknownError, message: error.localizedDescription)
-                        completion(.failure(parseError))
-                    }
+                    completion(.failure(parseError))
                 }
             }
         }
@@ -510,6 +511,7 @@ extension ParseFile {
 
 // MARK: Fetching
 extension ParseFile {
+
     /**
      Fetches a file with given url *synchronously*.
      - parameter options: A set of header options sent to the server. Defaults to an empty set.
@@ -521,21 +523,8 @@ extension ParseFile {
     public func fetch(options: API.Options = [],
                       stream: InputStream,
                       callbackQueue: DispatchQueue = .main) throws {
-        var options = options
-        if let mimeType = mimeType {
-            options.insert(.mimeType(mimeType))
-        } else {
-            options.insert(.removeMimeType)
-        }
-        if let metadata = metadata {
-            options.insert(.metadata(metadata))
-        }
-        if let tags = tags {
-            options.insert(.tags(tags))
-        }
-        options = options.union(self.options)
-        return try downloadFileCommand()
-            .executeStream(options: options,
+        try downloadFileCommand()
+            .executeStream(options: setDefaultOptions(options),
                            callbackQueue: callbackQueue,
                            stream: stream)
     }
@@ -550,21 +539,23 @@ extension ParseFile {
     public func fetch(includeKeys: [String]? = nil,
                       options: API.Options = [],
                       callbackQueue: DispatchQueue) throws -> ParseFile {
-        var options = options
-        if let mimeType = mimeType {
-            options.insert(.mimeType(mimeType))
-        } else {
-            options.insert(.removeMimeType)
+        let options = setDefaultOptions(options)
+        do {
+            guard let file = try checkDownloadsForFile(options: options) else {
+                throw ParseError(code: .unsavedFileFailure,
+                                 message: "File not downloaded")
+            }
+            return file
+        } catch {
+            let defaultError = ParseError(code: .unknownError,
+                                          message: error.localizedDescription)
+            let parseError = error as? ParseError ?? defaultError
+            guard parseError.code != .unsavedFileFailure else {
+                throw parseError
+            }
+            return try downloadFileCommand()
+                .execute(options: options)
         }
-        if let metadata = metadata {
-            options.insert(.metadata(metadata))
-        }
-        if let tags = tags {
-            options.insert(.tags(tags))
-        }
-        options = options.union(self.options)
-        return try downloadFileCommand()
-            .execute(options: options)
     }
 
     /**
@@ -623,23 +614,25 @@ extension ParseFile {
     public func fetch(options: API.Options = [],
                       callbackQueue: DispatchQueue = .main,
                       progress: @escaping ((URLSessionDownloadTask, Int64, Int64, Int64) -> Void)) throws -> ParseFile {
-        var options = options
-        if let mimeType = mimeType {
-            options.insert(.mimeType(mimeType))
-        } else {
-            options.insert(.removeMimeType)
+        let options = setDefaultOptions(options)
+        do {
+            guard let file = try checkDownloadsForFile(options: options) else {
+                throw ParseError(code: .unsavedFileFailure,
+                                 message: "File not downloaded")
+            }
+            return file
+        } catch {
+            let defaultError = ParseError(code: .unknownError,
+                                          message: error.localizedDescription)
+            let parseError = error as? ParseError ?? defaultError
+            guard parseError.code != .unsavedFileFailure else {
+                throw parseError
+            }
+            return try downloadFileCommand()
+                .execute(options: options,
+                         notificationQueue: callbackQueue,
+                         downloadProgress: progress)
         }
-        if let metadata = metadata {
-            options.insert(.metadata(metadata))
-        }
-        if let tags = tags {
-            options.insert(.tags(tags))
-        }
-        options = options.union(self.options)
-        return try downloadFileCommand()
-            .execute(options: options,
-                     notificationQueue: callbackQueue,
-                     downloadProgress: progress)
     }
 
     /**
@@ -688,24 +681,31 @@ extension ParseFile {
                       callbackQueue: DispatchQueue = .main,
                       progress: ((URLSessionDownloadTask, Int64, Int64, Int64) -> Void)? = nil,
                       completion: @escaping (Result<Self, ParseError>) -> Void) {
-        var options = options
-        if let mimeType = mimeType {
-            options.insert(.mimeType(mimeType))
-        } else {
-            options.insert(.removeMimeType)
-        }
-        if let metadata = metadata {
-            options.insert(.metadata(metadata))
-        }
-        if let tags = tags {
-            options.insert(.tags(tags))
-        }
-        options = options.union(self.options)
-        downloadFileCommand()
-            .executeAsync(options: options,
-                          callbackQueue: callbackQueue,
-                          downloadProgress: progress) { result in
-                completion(result)
+        let options = setDefaultOptions(options)
+        do {
+            guard let file = try checkDownloadsForFile(options: options) else {
+                throw ParseError(code: .unsavedFileFailure,
+                                 message: "File not downloaded")
+            }
+            callbackQueue.async {
+                completion(.success(file))
+            }
+        } catch {
+            let defaultError = ParseError(code: .unknownError,
+                                          message: error.localizedDescription)
+            let parseError = error as? ParseError ?? defaultError
+            guard parseError.code != .unsavedFileFailure else {
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+                return
+            }
+            downloadFileCommand()
+                .executeAsync(options: options,
+                              callbackQueue: callbackQueue,
+                              downloadProgress: progress) { result in
+                    completion(result)
+                }
         }
     }
 

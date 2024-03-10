@@ -11,35 +11,33 @@ import Foundation
 // swiftlint:disable line_length
 
 /**
- Objects that conform to the `ParseObject` protocol have a local representation of data persisted to the Parse cloud.
+ Objects that conform to the `ParseObject` protocol have a local representation of data persisted to the Parse Server.
  This is the main protocol that is used to interact with objects in your app.
 
- The Swift SDK is designed for your `ParseObject`s to be "value types" (structs).
- If you are using value types the the compiler will assist you with conforming to `ParseObject` protocol. If you
- are thinking of using reference types, see the warning.
-
- After a `ParseObject`is saved/created to a Parse Server. It is recommended to conduct the rest of your updates on a
- `mergeable` copy of your `ParseObject`. This allows a subset of the fields to be updated (PATCH) of an object
- as oppose to replacing all of the fields of an object (PUT). This reduces the amount of data
- sent between client and server when using `save`, `saveAll`, `update`,
+ The Swift SDK is designed for your `ParseObject`s to be **value types (structures)**.
+ Since you are using value types the compiler will assist you with conforming to the `ParseObject` protocol.
+ After a `ParseObject`is saved/created to a Parse Server. It is recommended to conduct any updates on a
+ `mergeable` copy of your `ParseObject`. This can be accomplished by calling the `mergeable` property
+ of your `ParseObject` or by calling the `set()` method on your `ParseObject`. This allows a subset
+ of the fields to be updated (PATCH) of an object as oppose to replacing all of the fields of an object (PUT).
+ This reduces the amount of data sent between client and server when using `save`, `saveAll`, `update`,
  `updateAll`, `replace`, `replaceAll`, to update objects.
  
- - important: It is required that all added properties be optional properties so they can eventually be used as
- Parse `Pointer`'s. If a developer really wants to have a required key, they should require it on the server-side or
- create methods to check the respective properties on the client-side before saving objects. See
+ - important: It is required that all of your `ParseObject`'s be **value types (structures)** and all added
+ properties be optional so they can eventually be used as Parse `Pointer`'s. If a developer really wants to
+ have a required key, they should require it on the server-side or create methods to check the respective properties
+ on the client-side before saving objects. See
  [here](https://github.com/parse-community/Parse-Swift/pull/315#issuecomment-1014701003)
  for more information on the reasons why. See the [Playgrounds](https://github.com/parse-community/Parse-Swift/blob/c119033f44b91570997ad24f7b4b5af8e4d47b64/ParseSwift.playground/Pages/1%20-%20Your%20first%20Object.xcplaygroundpage/Contents.swift#L32-L66) for an example.
- - important: To take advantage of `mergeable`, the developer should implement the `merge` method in every
- `ParseObject`.
- - warning: If you plan to use "reference types" (classes), you are using at your risk as this SDK is not designed
- for reference types and may have unexpected behavior when it comes to threading. You will also need to implement
+ - important: A developer can take advantage of `mergeable` updates in two ways: 1) By calling the `set()` method when starting
+ to mutate a saved `ParseObject`, or 2) implement the `merge` method in each of your`ParseObject` models.
+ - note: If you plan to use custom encoding/decoding, be sure to add `objectId`, `createdAt`, `updatedAt`, and
+ `ACL` to your `ParseObject`'s `CodingKeys`.
+ - warning: This SDK is not designed to use **reference types(classes)** for `ParseObject`'s. Doing so is at your
+ risk and may have unexpected behavior when it comes to threading. You will also need to implement
  your own `==` method to conform to `Equatable` along with with the `hash` method to conform to `Hashable`.
  It is important to note that for unsaved `ParseObject`'s, you will not be able to rely on `objectId` for
- `Equatable` and `Hashable` as your unsaved objects will not have this value yet and is nil. A possible way to
- address this is by creating a `UUID` for your objects locally and relying on that for `Equatable` and `Hashable`,
- otherwise it is possible you will get "circular dependency errors" depending on your implementation.
- - note: If you plan to use custom encoding/decoding, be sure to add `objectId`, `createdAt`, `updatedAt`, and
- `ACL` to your `ParseObject` `CodingKeys`.
+ `Equatable` and `Hashable` as your unsaved objects will not have this value yet and is nil.
 */
 public protocol ParseObject: ParseTypeable,
                              Objectable,
@@ -72,6 +70,9 @@ public protocol ParseObject: ParseTypeable,
      ([memberwise initializer](https://docs.swift.org/swift-book/LanguageGuide/Initialization.html))
      as long as you declare all properties as **optional** (see **Warning** section) and you declare all other initializers in
      an **extension**. See the [Playgrounds](https://github.com/parse-community/Parse-Swift/blob/c119033f44b91570997ad24f7b4b5af8e4d47b64/ParseSwift.playground/Pages/1%20-%20Your%20first%20Object.xcplaygroundpage/Contents.swift#L32-L66) for an example.
+     - attention: This initilizer **should remain empty and no properties should be implemented inside of it**. The SDK needs
+     this initializer to create new instances of your `ParseObject` when saving, updating, and converting to/from Parse Pointers. If you need
+     to initiaze properties, create additional initializers.
      - warning: It is required that all added properties be optional properties so they can eventually be used as
      Parse `Pointer`'s. If a developer really wants to have a required key, they should require it on the server-side or
      create methods to check the respective properties on the client-side before saving objects. See
@@ -83,6 +84,7 @@ public protocol ParseObject: ParseTypeable,
     /**
      Determines if a `KeyPath` of the current `ParseObject` should be restored
      by comparing it to another `ParseObject`.
+     - parameter key: The `KeyPath` to check.
      - parameter original: The original `ParseObject`.
      - returns: Returns a **true** if the keyPath should be restored  or **false** otherwise.
     */
@@ -150,18 +152,19 @@ public extension ParseObject {
     }
 
     /**
-    A computed property that is the same value as `objectId` and makes it easy to use `ParseObject`'s
+     A computed property that is the same value as `objectId` and makes it easy to use `ParseObject`'s
      as models in MVVM and SwiftUI.
-     - note: `id` allows `ParseObjects`'s to be used even if they are unsaved and do not have an `objectId`.
+     - note: `id` allows `ParseObjects`'s to be used even when they are unsaved and do not have an `objectId`.
     */
     var id: String {
-        guard let objectId = self.objectId else {
-            return UUID().uuidString
-        }
-        return objectId
+        objectId ?? UUID().uuidString
     }
 
     var mergeable: Self {
+        guard isSaved,
+            originalData == nil else {
+            return self
+        }
         var object = Self()
         object.objectId = objectId
         object.createdAt = createdAt
@@ -180,7 +183,7 @@ public extension ParseObject {
 
     /**
      Converts this `ParseObject` to a Parse Pointer.
-     - returns: Pointer<Self>
+     - returns: The pointer version of the `ParseObject`, Pointer<Self>.
     */
     func toPointer() throws -> Pointer<Self> {
         return try Pointer(self)
@@ -198,14 +201,153 @@ public extension ParseObject {
         }
         var updated = self
         if shouldRestoreKey(\.ACL,
-                                 original: object) {
+                             original: object) {
             updated.ACL = object.ACL
         }
         return updated
     }
 
     func merge(with object: Self) throws -> Self {
-        return try mergeParse(with: object)
+        do {
+            return try mergeAutomatically(object)
+        } catch {
+            return try mergeParse(with: object)
+        }
+    }
+}
+
+// MARK: Default Implementations (Internal)
+extension ParseObject {
+    func shouldRevertKey<W>(_ key: KeyPath<Self, W?>,
+                            original: Self) -> Bool where W: Equatable {
+        original[keyPath: key] != self[keyPath: key]
+    }
+}
+
+// MARK: Helper Methods
+public extension ParseObject {
+    /**
+     Reverts the `KeyPath` of the `ParseObject` back to  the original `KeyPath`
+     before mutations began.
+     - throws: An error of type `ParseError`.
+     - important: This reverts to the contents in `originalData`. This means `originalData` should have
+     been populated by calling `mergeable` or the `set` method.
+    */
+    @available(*, deprecated, renamed: "revert")
+    func revertKeyPath<W>(_ keyPath: WritableKeyPath<Self, W?>) throws -> Self where W: Equatable {
+        try revert(keyPath)
+    }
+
+    /**
+     Reverts the `ParseObject` back to the original object before mutations began.
+     - throws: An error of type `ParseError`.
+     - important: This reverts to the contents in `originalData`. This means `originalData` should have
+     been populated by calling `mergeable` or the `set` method.
+    */
+    @available(*, deprecated, renamed: "revert")
+    func revertObject() throws -> Self {
+        try revert()
+    }
+
+    /**
+     Reverts the `KeyPath` of the `ParseObject` back to  the original `KeyPath`
+     before mutations began.
+     - throws: An error of type `ParseError`.
+     - important: This reverts to the contents in `originalData`. This means `originalData` should have
+     been populated by calling `mergeable` or the `set` method.
+    */
+    func revert<W>(_ keyPath: WritableKeyPath<Self, W?>) throws -> Self where W: Equatable {
+        guard let originalData = originalData else {
+            throw ParseError(code: .unknownError,
+                             message: "Missing original data to revert to")
+        }
+        let original = try ParseCoding.jsonDecoder().decode(Self.self,
+                                                            from: originalData)
+        guard hasSameObjectId(as: original) else {
+            throw ParseError(code: .unknownError,
+                             message: "The current object does not have the same objectId as the original")
+        }
+        var updated = self
+        if shouldRevertKey(keyPath,
+                           original: original) {
+            updated[keyPath: keyPath] = original[keyPath: keyPath]
+        }
+        return updated
+    }
+
+    /**
+     Reverts the `ParseObject` back to the original object before mutations began.
+     - throws: An error of type `ParseError`.
+     - important: This reverts to the contents in `originalData`. This means `originalData` should have
+     been populated by calling `mergeable` or the `set` method.
+    */
+    func revert() throws -> Self {
+        guard let originalData = originalData else {
+            throw ParseError(code: .unknownError,
+                             message: "Missing original data to revert to")
+        }
+        let original = try ParseCoding.jsonDecoder().decode(Self.self,
+                                                            from: originalData)
+        guard hasSameObjectId(as: original) else {
+            throw ParseError(code: .unknownError,
+                             message: "The current object does not have the same objectId as the original")
+        }
+        return original
+    }
+
+    /**
+     Get the unwrapped property value.
+     - parameter key: The `KeyPath` of the value to get.
+     - throws: An error of type `ParseError` when the value is **nil**.
+     - returns: The unwrapped value.
+     */
+    @discardableResult
+    func get<W>(_ keyPath: KeyPath<Self, W?>) throws -> W where W: Equatable {
+        guard let value = self[keyPath: keyPath] else {
+            throw ParseError(code: .unknownError, message: "Could not unwrap value")
+        }
+        return value
+    }
+
+    /**
+     Set the value of a specific `KeyPath` on a `ParseObject`.
+     - parameter key: The `KeyPath` of the value to set.
+     - parameter value: The value to set the `KeyPath` to.
+     - returns: The updated `ParseObject`.
+     - important: This method should be used when updating a `ParseObject` that has already been saved to
+     a Parse Server. You can also use this method on a new `ParseObject`'s that has not been saved to a Parse Server
+     as long as the `objectId` of the respective `ParseObject` is **nil**.
+     - attention: If you are using the `set()` method, you do not need to implement `merge()`. Using `set()`
+     may perform slower than implementing `merge()` after saving the updated `ParseObject` to a Parse Server.
+     This is due to neccesary overhead required to determine what keys have been updated. If a developer finds decoding
+     updated `ParseObjects`'s to be slow, implementing `merge()` may speed up the process.
+     - warning: This method should always be used when making the very first update/mutation to your `ParseObject`.
+     Any subsequent mutations can modify the `ParseObject` property directly or use the `set()` method.
+     */
+    func set<W>(_ keyPath: WritableKeyPath<Self, W?>, to value: W) -> Self where W: Equatable {
+        var updated = self.mergeable
+        updated[keyPath: keyPath] = value
+        return updated
+    }
+}
+
+// MARK: Helper Methods (Internal)
+extension ParseObject {
+
+    func mergeAutomatically(_ originalObject: Self) throws -> Self {
+        let updatedEncoded = try ParseCoding.jsonEncoder().encode(self)
+        let originalData = try ParseCoding.jsonEncoder().encode(originalObject)
+        guard let updated = try JSONSerialization.jsonObject(with: updatedEncoded) as? [String: AnyObject],
+            var original = try JSONSerialization.jsonObject(with: originalData) as? [String: AnyObject] else {
+            throw ParseError(code: .unknownError,
+                             message: "Could not encode/decode necessary objects")
+        }
+        updated.forEach { (key, value) in
+            original[key] = value
+        }
+        let mergedEncoded = try JSONSerialization.data(withJSONObject: original)
+        return try ParseCoding.jsonDecoder().decode(Self.self,
+                                                    from: mergedEncoded)
     }
 }
 
@@ -236,7 +378,7 @@ transactions for this call.
      - parameter transaction: Treat as an all-or-nothing operation. If some operation failure occurs that
      prevents the transaction from completing, then none of the objects are committed to the Parse Server database.
      - parameter ignoringCustomObjectIdConfig: Ignore checking for `objectId`
-     when `ParseConfiguration.isAllowingCustomObjectIds = true` to allow for mixed
+     when `ParseConfiguration.isRequiringCustomObjectIds = true` to allow for mixed
      `objectId` environments. Defaults to false.
      - parameter options: A set of header options sent to the server. Defaults to an empty set.
      - returns: Returns an array of Result enums with the object if a save was successful or a
@@ -245,10 +387,10 @@ transactions for this call.
      - warning: If `transaction = true`, then `batchLimit` will be automatically be set to the amount of the
      objects in the transaction. The developer should ensure their respective Parse Servers can handle the limit or else
      the transactions can fail.
-     - warning: If you are using `ParseConfiguration.isAllowingCustomObjectIds = true`
+     - warning: If you are using `ParseConfiguration.isRequiringCustomObjectIds = true`
      and plan to generate all of your `objectId`'s on the client-side then you should leave
      `ignoringCustomObjectIdConfig = false`. Setting
-     `ParseConfiguration.isAllowingCustomObjectIds = true` and
+     `ParseConfiguration.isRequiringCustomObjectIds = true` and
      `ignoringCustomObjectIdConfig = true` means the client will generate `objectId`'s
      and the server will generate an `objectId` only when the client does not provide one. This can
      increase the probability of colliiding `objectId`'s as the client and server `objectId`'s may be generated using
@@ -318,6 +460,7 @@ transactions for this call.
             let currentBatch = try API.Command<Self.Element, Self.Element>
                 .batch(commands: $0, transaction: transaction)
                 .execute(options: options,
+                         batching: true,
                          childObjects: childObjects,
                          childFiles: childFiles)
             returnBatch.append(contentsOf: currentBatch)
@@ -333,7 +476,7 @@ transactions for this call.
      - parameter transaction: Treat as an all-or-nothing operation. If some operation failure occurs that
      prevents the transaction from completing, then none of the objects are committed to the Parse Server database.
      - parameter ignoringCustomObjectIdConfig: Ignore checking for `objectId`
-     when `ParseConfiguration.isAllowingCustomObjectIds = true` to allow for mixed
+     when `ParseConfiguration.isRequiringCustomObjectIds = true` to allow for mixed
      `objectId` environments. Defaults to false.
      - parameter options: A set of header options sent to the server. Defaults to an empty set.
      - parameter callbackQueue: The queue to return to after completion. Default value of .main.
@@ -342,10 +485,10 @@ transactions for this call.
      - warning: If `transaction = true`, then `batchLimit` will be automatically be set to the amount of the
      objects in the transaction. The developer should ensure their respective Parse Servers can handle the limit or else
      the transactions can fail.
-     - warning: If you are using `ParseConfiguration.isAllowingCustomObjectIds = true`
+     - warning: If you are using `ParseConfiguration.isRequiringCustomObjectIds = true`
      and plan to generate all of your `objectId`'s on the client-side then you should leave
      `ignoringCustomObjectIdConfig = false`. Setting
-     `ParseConfiguration.isAllowingCustomObjectIds = true` and
+     `ParseConfiguration.isRequiringCustomObjectIds = true` and
      `ignoringCustomObjectIdConfig = true` means the client will generate `objectId`'s
      and the server will generate an `objectId` only when the client does not provide one. This can
      increase the probability of colliiding `objectId`'s as the client and server `objectId`'s may be generated using
@@ -362,13 +505,35 @@ transactions for this call.
         callbackQueue: DispatchQueue = .main,
         completion: @escaping (Result<[(Result<Element, ParseError>)], ParseError>) -> Void
     ) {
-        batchCommand(method: .save,
+        let method = Method.save
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            do {
+                let objects = try await batchCommand(method: method,
+                                                     batchLimit: limit,
+                                                     transaction: transaction,
+                                                     ignoringCustomObjectIdConfig: ignoringCustomObjectIdConfig,
+                                                     options: options,
+                                                     callbackQueue: callbackQueue)
+                completion(.success(objects))
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+            }
+        }
+        #else
+        batchCommand(method: method,
                      batchLimit: limit,
                      transaction: transaction,
                      ignoringCustomObjectIdConfig: ignoringCustomObjectIdConfig,
                      options: options,
                      callbackQueue: callbackQueue,
                      completion: completion)
+        #endif
     }
 
     /**
@@ -395,12 +560,33 @@ transactions for this call.
         callbackQueue: DispatchQueue = .main,
         completion: @escaping (Result<[(Result<Element, ParseError>)], ParseError>) -> Void
     ) {
-        batchCommand(method: .create,
+        let method = Method.create
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            do {
+                let objects = try await batchCommand(method: method,
+                                                     batchLimit: limit,
+                                                     transaction: transaction,
+                                                     options: options,
+                                                     callbackQueue: callbackQueue)
+                completion(.success(objects))
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+            }
+        }
+        #else
+        batchCommand(method: method,
                      batchLimit: limit,
                      transaction: transaction,
                      options: options,
                      callbackQueue: callbackQueue,
                      completion: completion)
+        #endif
     }
 
     /**
@@ -427,12 +613,33 @@ transactions for this call.
         callbackQueue: DispatchQueue = .main,
         completion: @escaping (Result<[(Result<Element, ParseError>)], ParseError>) -> Void
     ) {
-        batchCommand(method: .replace,
+        let method = Method.replace
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            do {
+                let objects = try await batchCommand(method: method,
+                                                     batchLimit: limit,
+                                                     transaction: transaction,
+                                                     options: options,
+                                                     callbackQueue: callbackQueue)
+                completion(.success(objects))
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+            }
+        }
+        #else
+        batchCommand(method: method,
                      batchLimit: limit,
                      transaction: transaction,
                      options: options,
                      callbackQueue: callbackQueue,
                      completion: completion)
+        #endif
     }
 
     /**
@@ -459,12 +666,33 @@ transactions for this call.
         callbackQueue: DispatchQueue = .main,
         completion: @escaping (Result<[(Result<Element, ParseError>)], ParseError>) -> Void
     ) {
-        batchCommand(method: .update,
+        let method = Method.update
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            do {
+                let objects = try await batchCommand(method: method,
+                                                     batchLimit: limit,
+                                                     transaction: transaction,
+                                                     options: options,
+                                                     callbackQueue: callbackQueue)
+                completion(.success(objects))
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+            }
+        }
+        #else
+        batchCommand(method: method,
                      batchLimit: limit,
                      transaction: transaction,
                      options: options,
                      callbackQueue: callbackQueue,
                      completion: completion)
+        #endif
     }
 
     internal func batchCommand(method: Method, // swiftlint:disable:this function_parameter_count
@@ -495,30 +723,28 @@ transactions for this call.
                                       // swiftlint:disable:next line_length
                                       isShouldReturnIfChildObjectsFound: transaction) { (savedChildObjects, savedChildFiles, parseError) -> Void in
                     // If an error occurs, everything should be skipped
-                    if parseError != nil {
+                    if let parseError = parseError {
                         error = parseError
                     }
                     savedChildObjects.forEach {(key, value) in
-                        if error != nil {
+                        guard error == nil else {
                             return
                         }
-                        if childObjects[key] == nil {
-                            childObjects[key] = value
-                        } else {
+                        guard childObjects[key] == nil else {
                             error = ParseError(code: .unknownError, message: "circular dependency")
                             return
                         }
+                        childObjects[key] = value
                     }
                     savedChildFiles.forEach {(key, value) in
-                        if error != nil {
+                        guard error == nil else {
                             return
                         }
-                        if childFiles[key] == nil {
-                            childFiles[key] = value
-                        } else {
+                        guard childFiles[key] == nil else {
                             error = ParseError(code: .unknownError, message: "circular dependency")
                             return
                         }
+                        childFiles[key] = value
                     }
                     group.leave()
                 }
@@ -544,12 +770,11 @@ transactions for this call.
                         commands.append(try object.updateCommand())
                     }
                 } catch {
+                    let defaultError = ParseError(code: .unknownError,
+                                                  message: error.localizedDescription)
+                    let parseError = error as? ParseError ?? defaultError
                     callbackQueue.async {
-                        if let parseError = error as? ParseError {
-                            completion(.failure(parseError))
-                        } else {
-                            completion(.failure(.init(code: .unknownError, message: error.localizedDescription)))
-                        }
+                        completion(.failure(parseError))
                     }
                     return
                 }
@@ -566,6 +791,7 @@ transactions for this call.
                     API.Command<Self.Element, Self.Element>
                             .batch(commands: batch, transaction: transaction)
                             .executeAsync(options: options,
+                                          batching: true,
                                           callbackQueue: callbackQueue,
                                           childObjects: childObjects,
                                           childFiles: childFiles) { results in
@@ -584,12 +810,11 @@ transactions for this call.
                     }
                 }
             } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
                 callbackQueue.async {
-                    if let parseError = error as? ParseError {
-                        completion(.failure(parseError))
-                    } else {
-                        completion(.failure(.init(code: .unknownError, message: error.localizedDescription)))
-                    }
+                    completion(.failure(parseError))
                 }
             }
         }
@@ -796,12 +1021,10 @@ transactions for this call.
                 }
             }
         } catch {
+            let defaultError = ParseError(code: .unknownError,
+                                          message: error.localizedDescription)
+            let parseError = error as? ParseError ?? defaultError
             callbackQueue.async {
-                guard let parseError = error as? ParseError else {
-                    completion(.failure(ParseError(code: .unknownError,
-                                                   message: error.localizedDescription)))
-                    return
-                }
                 completion(.failure(parseError))
             }
         }
@@ -902,6 +1125,7 @@ extension ParseObject {
 
      - returns: Returns saved `ParseObject`.
     */
+    @discardableResult
     public func save(options: API.Options = []) throws -> Self {
         try save(ignoringCustomObjectIdConfig: false, options: options)
     }
@@ -909,16 +1133,16 @@ extension ParseObject {
     /**
      Saves the `ParseObject` *synchronously* and throws an error if there is an issue.
      - parameter ignoringCustomObjectIdConfig: Ignore checking for `objectId`
-     when `ParseConfiguration.isAllowingCustomObjectIds = true` to allow for mixed
+     when `ParseConfiguration.isRequiringCustomObjectIds = true` to allow for mixed
      `objectId` environments. Defaults to false.
      - parameter options: A set of header options sent to the server. Defaults to an empty set.
      - throws: An error of type `ParseError`.
 
      - returns: Returns saved `ParseObject`.
-     - warning: If you are using `ParseConfiguration.isAllowingCustomObjectIds = true`
+     - warning: If you are using `ParseConfiguration.isRequiringCustomObjectIds = true`
      and plan to generate all of your `objectId`'s on the client-side then you should leave
      `ignoringCustomObjectIdConfig = false`. Setting
-     `ParseConfiguration.isAllowingCustomObjectIds = true` and
+     `ParseConfiguration.isRequiringCustomObjectIds = true` and
      `ignoringCustomObjectIdConfig = true` means the client will generate `objectId`'s
      and the server will generate an `objectId` only when the client does not provide one. This can
      increase the probability of colliiding `objectId`'s as the client and server `objectId`'s may be generated using
@@ -927,6 +1151,7 @@ extension ParseObject {
      - note: The default cache policy for this method is `.reloadIgnoringLocalCacheData`. If a developer
      desires a different policy, it should be inserted in `options`.
     */
+    @discardableResult
     public func save(ignoringCustomObjectIdConfig: Bool = false,
                      options: API.Options = []) throws -> Self {
         var childObjects: [String: PointerType]?
@@ -958,16 +1183,16 @@ extension ParseObject {
      Saves the `ParseObject` *asynchronously* and executes the given callback block.
 
      - parameter ignoringCustomObjectIdConfig: Ignore checking for `objectId`
-     when `ParseConfiguration.isAllowingCustomObjectIds = true` to allow for mixed
+     when `ParseConfiguration.isRequiringCustomObjectIds = true` to allow for mixed
      `objectId` environments. Defaults to false.
      - parameter options: A set of header options sent to the server. Defaults to an empty set.
      - parameter callbackQueue: The queue to return to after completion. Default value of .main.
      - parameter completion: The block to execute.
      It should have the following argument signature: `(Result<Self, ParseError>)`.
-     - warning: If you are using `ParseConfiguration.isAllowingCustomObjectIds = true`
+     - warning: If you are using `ParseConfiguration.isRequiringCustomObjectIds = true`
      and plan to generate all of your `objectId`'s on the client-side then you should leave
      `ignoringCustomObjectIdConfig = false`. Setting
-     `ParseConfiguration.isAllowingCustomObjectIds = true` and
+     `ParseConfiguration.isRequiringCustomObjectIds = true` and
      `ignoringCustomObjectIdConfig = true` means the client will generate `objectId`'s
      and the server will generate an `objectId` only when the client does not provide one. This can
      increase the probability of colliiding `objectId`'s as the client and server `objectId`'s may be generated using
@@ -980,11 +1205,31 @@ extension ParseObject {
         callbackQueue: DispatchQueue = .main,
         completion: @escaping (Result<Self, ParseError>) -> Void
     ) {
-        command(method: .save,
+        let method = Method.save
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            do {
+                let object = try await command(method: method,
+                                               ignoringCustomObjectIdConfig: ignoringCustomObjectIdConfig,
+                                               options: options,
+                                               callbackQueue: callbackQueue)
+                completion(.success(object))
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+            }
+        }
+        #else
+        command(method: method,
                 ignoringCustomObjectIdConfig: ignoringCustomObjectIdConfig,
                 options: options,
                 callbackQueue: callbackQueue,
                 completion: completion)
+        #endif
     }
 
     /**
@@ -1000,10 +1245,29 @@ extension ParseObject {
         callbackQueue: DispatchQueue = .main,
         completion: @escaping (Result<Self, ParseError>) -> Void
     ) {
-        command(method: .create,
+        let method = Method.create
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            do {
+                let object = try await command(method: method,
+                                               options: options,
+                                               callbackQueue: callbackQueue)
+                completion(.success(object))
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+            }
+        }
+        #else
+        command(method: method,
                 options: options,
                 callbackQueue: callbackQueue,
                 completion: completion)
+        #endif
     }
 
     /**
@@ -1019,10 +1283,29 @@ extension ParseObject {
         callbackQueue: DispatchQueue = .main,
         completion: @escaping (Result<Self, ParseError>) -> Void
     ) {
-        command(method: .replace,
+        let method = Method.replace
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            do {
+                let object = try await command(method: method,
+                                               options: options,
+                                               callbackQueue: callbackQueue)
+                completion(.success(object))
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+            }
+        }
+        #else
+        command(method: method,
                 options: options,
                 callbackQueue: callbackQueue,
                 completion: completion)
+        #endif
     }
 
     /**
@@ -1038,10 +1321,29 @@ extension ParseObject {
         callbackQueue: DispatchQueue = .main,
         completion: @escaping (Result<Self, ParseError>) -> Void
     ) {
-        command(method: .update,
+        let method = Method.update
+        #if compiler(>=5.5.2) && canImport(_Concurrency)
+        Task {
+            do {
+                let object = try await command(method: method,
+                                               options: options,
+                                               callbackQueue: callbackQueue)
+                completion(.success(object))
+            } catch {
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
+                callbackQueue.async {
+                    completion(.failure(parseError))
+                }
+            }
+        }
+        #else
+        command(method: method,
                 options: options,
                 callbackQueue: callbackQueue,
                 completion: completion)
+        #endif
     }
 
     func command(method: Method,
@@ -1070,13 +1372,10 @@ extension ParseObject {
                                       childFiles: savedChildFiles,
                                       completion: completion)
                 } catch {
+                    let defaultError = ParseError(code: .unknownError,
+                                                  message: error.localizedDescription)
+                    let parseError = error as? ParseError ?? defaultError
                     callbackQueue.async {
-                        guard let parseError = error as? ParseError else {
-                            let error = ParseError(code: .unknownError,
-                                                   message: error.localizedDescription)
-                            completion(.failure(error))
-                            return
-                        }
                         completion(.failure(parseError))
                     }
                 }
@@ -1181,7 +1480,6 @@ extension ParseObject {
                                               message: "Found a circular dependency in ParseObject."))
                         return
                     }
-
                     if savableObjects.count > 0 {
                         let savedChildObjects = try self.saveAll(objects: savableObjects,
                                                                  options: options)
@@ -1198,12 +1496,9 @@ extension ParseObject {
                 }
                 completion(objectsFinishedSaving, filesFinishedSaving, nil)
             } catch {
-                guard let parseError = error as? ParseError else {
-                    completion(objectsFinishedSaving, filesFinishedSaving,
-                               ParseError(code: .unknownError,
-                                          message: error.localizedDescription))
-                    return
-                }
+                let defaultError = ParseError(code: .unknownError,
+                                              message: error.localizedDescription)
+                let parseError = error as? ParseError ?? defaultError
                 completion(objectsFinishedSaving, filesFinishedSaving, parseError)
             }
         }
